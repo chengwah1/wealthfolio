@@ -11,7 +11,7 @@ export function useSwingActivities(ctx: AddonContext) {
     queryFn: async (): Promise<SwingActivity[]> => {
       try {
         // Use search API with filters for BUY/SELL activities, and optionally DIVIDEND
-        const activityTypes = ["BUY", "SELL"];
+        const activityTypes = ["BUY", "SELL","SELL_SHORT", "BUY_COVER"];
         if (preferences.includeDividends) {
           activityTypes.push("DIVIDEND");
         }

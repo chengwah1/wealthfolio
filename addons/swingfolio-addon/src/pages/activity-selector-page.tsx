@@ -214,6 +214,8 @@ export default function ActivitySelectorPage({ ctx }: ActivitySelectorPageProps)
                   <SelectItem value="all">All Types</SelectItem>
                   <SelectItem value="BUY">Buy</SelectItem>
                   <SelectItem value="SELL">Sell</SelectItem>
+                  <SelectItem value="SELL_SHORT">Sell Short</SelectItem>
+                  <SelectItem value="BUY_COVER">Buy Cover</SelectItem>
                 </SelectContent>
               </Select>
             </div>
