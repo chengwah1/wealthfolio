@@ -249,10 +249,17 @@ function updateOpenPositionsWithMarketPrices(
         // Note: More complex currency conversions would need additional FX rate lookups
       }
       
-      const marketValue = currentPrice * position.quantity;
-      const costBasis = position.averageCost * position.quantity;
-      // Include dividends in unrealized P/L calculation to match TradeMatcher
-      const unrealizedPL = marketValue - costBasis + (position.totalDividends || 0);
+      const marketValue = currentPrice * Math.abs(position.quantity);
+      // For short positions, quantity is negative. We need the absolute quantity for cost basis.
+      const absQuantity = Math.abs(position.quantity);
+      const costBasis = position.averageCost * absQuantity;
+      const isShort = position.quantity < 0;
+
+      // Use the correct P/L formula for long vs. short positions
+      const unrealizedPL = isShort
+        ? costBasis - marketValue + (position.totalDividends || 0)
+        : marketValue - costBasis + (position.totalDividends || 0);
+
       const unrealizedReturnPercent = costBasis > 0 ? unrealizedPL / costBasis : 0;
 
       return {

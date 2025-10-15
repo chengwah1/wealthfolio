@@ -89,7 +89,7 @@ export class TradeMatcher {
   private parseActivities(activities: ActivityDetails[]): ActivityDetails[] {
     return activities.map(a => ({
       ...a,
-      quantity: this.parseNumber(a.quantity),
+      quantity: this.parseNumber(Math.abs(a.quantity)),
       unitPrice: this.parseNumber(a.unitPrice),
       fee: this.parseNumber(a.fee),
       amount: this.parseNumber(a.amount),
@@ -151,75 +151,114 @@ export class TradeMatcher {
     const unmatchedBuys: ActivityDetails[] = []
     const unmatchedSells: ActivityDetails[] = []
 
-    let averageLot: AverageLot | null = null
+    let longAverageLot: AverageLot | null = null
+    let shortAverageLot: AverageLot | null = null
     
     for (const activity of activities) {
-      if (activity.activityType === "BUY") {
-        // Add to average lot
-        if (!averageLot) {
-          averageLot = this.createNewAverageLot(activity, symbol)
-          // Add dividends that occurred after any buy activity
-          if (this.includeDividends) {
-            averageLot.dividends = dividends.filter(div => new Date(div.date) >= new Date(activity.date))
-          }
-        } else {
-          this.updateAverageLot(averageLot, activity)
-          // Update dividends to include those after this new buy activity
-          if (this.includeDividends) {
-            const newDividends = dividends.filter(div => new Date(div.date) >= new Date(activity.date))
-            // Merge with existing dividends, avoiding duplicates
-            const existingDivIds = new Set(averageLot.dividends.map(d => d.id))
-            const uniqueNewDivs = newDividends.filter(d => !existingDivIds.has(d.id))
-            averageLot.dividends.push(...uniqueNewDivs)
-          }
-        }
-      } else if (activity.activityType === "SELL") {
-        // Process sell against average lot
-        if (!averageLot || averageLot.remainingQuantity <= 0) {
-          unmatchedSells.push(activity)
-          continue
-        }
+      const activityType = activity.activityType;
 
-        let sellQuantityRemaining = activity.quantity
+      if (activityType === "BUY" || activityType === "BUY_COVER") {
+        let buyQuantityRemaining = activity.quantity;
 
-        while (sellQuantityRemaining > 0 && averageLot.remainingQuantity > 0) {
-          const matchedQuantity = Math.min(sellQuantityRemaining, averageLot.remainingQuantity)
+        // If there's a short position, this BUY/BUY_COVER will close it first
+        if (shortAverageLot && shortAverageLot.remainingQuantity > 0) {
+          const matchedQuantity = Math.min(buyQuantityRemaining, shortAverageLot.remainingQuantity);
 
-          // Create closed trade using average price
+          // Create a closed trade (covering the short)
           const closedTrade = this.createClosedTradeAverage(
-            averageLot, 
-            activity, 
-            matchedQuantity, 
-            symbol
-          )
-          closedTrades.push(closedTrade)
+            shortAverageLot,
+            activity,
+            matchedQuantity,
+            symbol,
+            true // isShortTrade
+          );
+          closedTrades.push(closedTrade);
 
           // Update quantities
-          sellQuantityRemaining -= matchedQuantity
-          averageLot.remainingQuantity -= matchedQuantity
+          buyQuantityRemaining -= matchedQuantity;
+          shortAverageLot.remainingQuantity -= matchedQuantity;
+
+          if (shortAverageLot.remainingQuantity <= 0) {
+            shortAverageLot = null;
+          }
         }
 
-        // Reset average lot if fully sold
-        if (averageLot.remainingQuantity <= 0) {
-          averageLot = null
+        // If there's remaining quantity, it opens/adds to a long position
+        if (buyQuantityRemaining > 0) {
+          const buyActivityForLong = { ...activity, quantity: buyQuantityRemaining };
+          if (!longAverageLot) {
+            // *** FIX: Associate dividends at lot creation ***
+            longAverageLot = this.createNewAverageLot(buyActivityForLong, symbol);
+            if (this.includeDividends) {
+              longAverageLot.dividends = dividends.filter(div => new Date(div.date) >= new Date(activity.date));
+            }
+          } else {
+            // *** FIX: Update dividends when adding to a lot ***
+            this.updateAverageLot(longAverageLot, buyActivityForLong);
+            if (this.includeDividends) {
+              const newDividends = dividends.filter(div => new Date(div.date) >= new Date(activity.date));
+              const existingDivIds = new Set(longAverageLot.dividends.map(d => d.id));
+              longAverageLot.dividends.push(...newDividends.filter(d => !existingDivIds.has(d.id)));
+            }
+          }
+        }
+      } else if (activityType === "SELL" || activityType === "SELL_SHORT") {
+        let sellQuantityRemaining = activity.quantity;
+
+        // If there's a long position, this SELL will close it first
+        if (longAverageLot && longAverageLot.remainingQuantity > 0) {
+          const matchedQuantity = Math.min(sellQuantityRemaining, longAverageLot.remainingQuantity);
+
+          const closedTrade = this.createClosedTradeAverage(
+            longAverageLot,
+            activity,
+            matchedQuantity,
+            symbol
+          );
+          closedTrades.push(closedTrade);
+
+          sellQuantityRemaining -= matchedQuantity;
+          longAverageLot.remainingQuantity -= matchedQuantity;
+
+          if (longAverageLot.remainingQuantity <= 0) {
+            longAverageLot = null;
+          }
         }
 
-        // Handle remaining unmatched sell quantity
+        // If there's remaining quantity, it opens/adds to a short position
         if (sellQuantityRemaining > 0) {
-          unmatchedSells.push({
-            ...activity,
-            quantity: sellQuantityRemaining,
-          })
+          const sellActivityForShort = { ...activity, quantity: sellQuantityRemaining };
+          if (!shortAverageLot) {
+            // *** FIX: Associate dividends at lot creation (for shorts) ***
+            shortAverageLot = this.createNewAverageLot(sellActivityForShort, symbol);
+            if (this.includeDividends) {
+              shortAverageLot.dividends = dividends.filter(div => new Date(div.date) >= new Date(activity.date));
+            }
+          } else {
+            // *** FIX: Update dividends when adding to a lot (for shorts) ***
+            this.updateAverageLot(shortAverageLot, sellActivityForShort);
+            if (this.includeDividends) {
+              const newDividends = dividends.filter(div => new Date(div.date) >= new Date(activity.date));
+              const existingDivIds = new Set(shortAverageLot.dividends.map(d => d.id));
+              shortAverageLot.dividends.push(...newDividends.filter(d => !existingDivIds.has(d.id)));
+            }
+          }
         }
       }
     }
 
-    // Note: Dividends are already allocated during average lot creation/updates
+    // Create open long position
+    if (longAverageLot && longAverageLot.remainingQuantity > 0) {
+      const openPosition = this.createOpenPositionAverage(longAverageLot, symbol);
+      openPositions.push(openPosition);
+    }
 
-    // Create open position from remaining average lot
-    if (averageLot && averageLot.remainingQuantity > 0) {
-      const openPosition = this.createOpenPositionAverage(averageLot, symbol)
-      openPositions.push(openPosition)
+    // Create open short position
+    if (shortAverageLot && shortAverageLot.remainingQuantity > 0) {
+      const openPosition = this.createOpenPositionAverage(shortAverageLot, symbol, true);
+      // Make quantity negative for display
+      openPosition.quantity = -openPosition.quantity;
+      openPositions.push(openPosition);
     }
 
     return {
@@ -346,88 +385,104 @@ export class TradeMatcher {
    * Create a closed trade from average lot
    */
   private createClosedTradeAverage(
-    averageLot: AverageLot,
-    sellActivity: ActivityDetails,
+    entryLot: AverageLot,
+    exitActivity: ActivityDetails,
     quantity: number,
     symbol: string,
+    isShortTrade = false,
   ): ClosedTrade {
     // Use the earliest buy date for entry date
     const entryDate = new Date(
-      Math.min(...averageLot.activities.map(a => new Date(a.date).getTime()))
+      Math.min(...entryLot.activities.map(a => new Date(a.date).getTime()))
     )
-    const exitDate = new Date(sellActivity.date)
+    const exitDate = new Date(exitActivity.date)
     const holdingPeriodDays = differenceInDays(exitDate, entryDate)
 
     // Calculate fees proportionally
-    const totalBuyFees = averageLot.activities.reduce((sum, activity) => sum + activity.fee, 0)
-    const buyFeeAllocation = this.includeFees 
-      ? (totalBuyFees * quantity) / averageLot.totalQuantity 
+    const totalEntryFees = entryLot.activities.reduce((sum, activity) => sum + activity.fee, 0)
+    const entryFeeAllocation = this.includeFees 
+      ? (totalEntryFees * quantity) / entryLot.totalQuantity 
       : 0
     
     // Sell fees: Calculate proportionally for this sell
-    const sellFeeAllocation = this.includeFees 
-      ? (sellActivity.fee * quantity) / sellActivity.quantity 
+    const exitFeeAllocation = this.includeFees 
+      ? (exitActivity.fee * quantity) / exitActivity.quantity 
       : 0
-    const totalFees = buyFeeAllocation + sellFeeAllocation
+    const totalFees = entryFeeAllocation + exitFeeAllocation
 
     // Calculate dividends for this trade
-    const totalDividends = this.calculateTradeDividends(
+    let totalDividends = this.calculateTradeDividends(
       entryDate,
       exitDate,
       quantity,
-      averageLot.dividends
+      entryLot.dividends
     )
 
     // Calculate P/L using average cost
-    const costBasis = averageLot.averagePrice * quantity
-    const proceeds = sellActivity.unitPrice * quantity
-    const realizedPL = proceeds - costBasis - totalFees + totalDividends
+    const entryValue = entryLot.averagePrice * quantity
+    const exitValue = exitActivity.unitPrice * quantity
+
+    // For short trades, you pay dividends, so it's a cost.
+    if (isShortTrade) totalDividends = -totalDividends;
+
+    const realizedPL = isShortTrade 
+      ? entryValue - exitValue - totalFees + totalDividends
+      : exitValue - entryValue - totalFees + totalDividends;
+    const costBasis = entryValue;
     const returnPercent = costBasis > 0 ? realizedPL / costBasis : 0
 
-    // Get the most relevant buy activity
-    const relevantBuyActivity = averageLot.activities[averageLot.activities.length - 1]
+    const entryActivity = entryLot.activities[0];
+    const buyActivityId = isShortTrade ? exitActivity.id : entryActivity.id;
+    const sellActivityId = isShortTrade ? entryActivity.id : exitActivity.id;
 
     return {
-      id: `avg-${averageLot.activities[0].id}-${sellActivity.id}-${Date.now()}`,
+      id: `avg-${entryLot.activities[0].id}-${exitActivity.id}-${Date.now()}`,
       symbol,
-      assetName: sellActivity.assetName || undefined,
+      assetName: exitActivity.assetName || undefined,
       entryDate,
       exitDate,
       quantity,
-      entryPrice: averageLot.averagePrice,
-      exitPrice: sellActivity.unitPrice,
+      entryPrice: entryLot.averagePrice,
+      exitPrice: exitActivity.unitPrice,
       totalFees,
       totalDividends,
       realizedPL,
       returnPercent,
       holdingPeriodDays,
-      accountId: relevantBuyActivity.accountId,
-      accountName: relevantBuyActivity.accountName,
-      currency: relevantBuyActivity.currency,
-      buyActivityId: relevantBuyActivity.id,
-      sellActivityId: sellActivity.id,
+      accountId: entryActivity.accountId,
+      accountName: entryActivity.accountName,
+      currency: entryActivity.currency,
+      buyActivityId,
+      sellActivityId,
     }
   }
 
   /**
    * Create an open position from average lot
    */
-  private createOpenPositionAverage(averageLot: AverageLot, symbol: string): OpenPosition {
+  private createOpenPositionAverage(averageLot: AverageLot, symbol: string, isShort = false): OpenPosition {
     const openDate = new Date(
       Math.min(...averageLot.activities.map(a => new Date(a.date).getTime()))
     )
     const daysOpen = differenceInDays(new Date(), openDate)
 
     // Calculate total dividends for open position
-    const totalDividends = this.includeDividends
+    let totalDividends = this.includeDividends
       ? averageLot.dividends.reduce((sum, div) => sum + div.amount, 0)
       : 0
+    
+    // For short positions, dividends are a cost
+    if (isShort) totalDividends = -totalDividends;
 
     // Initial values (will be updated with real market prices)
     const currentPrice = averageLot.averagePrice
     const marketValue = currentPrice * averageLot.remainingQuantity
     const costBasis = averageLot.averagePrice * averageLot.remainingQuantity
-    const unrealizedPL = marketValue - costBasis + totalDividends
+
+    const unrealizedPL = isShort
+      ? costBasis - marketValue + totalDividends
+      : marketValue - costBasis + totalDividends;
+
     const unrealizedReturnPercent = costBasis > 0 ? unrealizedPL / costBasis : 0
 
     const latestActivity = averageLot.activities[averageLot.activities.length - 1]
