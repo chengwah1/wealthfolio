@@ -1,6 +1,6 @@
 {
-  "name": "swingfolio-addon",
-  "version": "1.0.4",
+  "name": "swingfolio-addon-mod",
+  "version": "1.0.0",
   "description": "A simple swing stock trading tracker with performance analytics and calendar views",
   "type": "module",
   "main": "dist/addon.js",
